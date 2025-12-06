@@ -17,27 +17,28 @@ import strings "core:strings"
   Reparent a window to the bottommost visible window in the desktop (i.e. on the desktop wallpaper)
   This is so we can render custom desktop wallpapers
  */
-get_wallpaper_window_handle :: proc(window: DXGI.HWND) -> win.HWND {
-	
-	LWA_ALPHA :: 0x02 // Missing flag
+get_worker_handle :: proc(window: DXGI.HWND) -> win.HWND {
 
+	// Some secret sauce for an extension to this project
+	// LWA_ALPHA :: 0x02 // Missing flag
 	// (window, color, alpha, flags)
     // win.SetLayeredWindowAttributes(window, 0x000, 255, LWA_ALPHA)
 	
 	///////////////////////////////////////////////////////////////////////////////////////////////
 	// Move window to the bottom of the desktop
 	// This is slightly different depending on windows 10 or 11
-
-
 	// this win32 black magic summons a worker window
 	// (used to move window to the bottom of the desktop)
+	progman := win.FindWindowW("Progman", nil)
+	if progman == nil {
+		panic("Failed to find progman window")
+	}
+	fmt.println("progman: ", progman)
+	SMTO_NORMAL :: 0x0000
+	win.SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, nil);
+	win.Sleep(1000) // wait for the worker window to be created
 
-	
-	// SMTO_NORMAL :: 0x0000
-	// win.SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, nil);
-	// win.Sleep(1000) // wait for the worker window to be created
-
-	shelldll_defview := win.FindWindowExW(native_window, nil, "SHELLDLL_DefView", nil)
+	shelldll_defview := win.FindWindowExW(progman, nil, "SHELLDLL_DefView", nil)
 	fmt.println("shelldll_defview: ", shelldll_defview)
 	
 	if shelldll_defview == nil {
@@ -50,14 +51,6 @@ get_wallpaper_window_handle :: proc(window: DXGI.HWND) -> win.HWND {
 		panic("Failed to find workerw window")
 	}
 
-	
-    exstyles := win.GetWindowLongW(workerw, win.GWL_EXSTYLE)
-    // transparent windows do not display correctly when reparented to the desktop
-	exstyles |= i32(win.WS_EX_NOACTIVATE | win.WS_EX_TOPMOST)
-    
-    win.SetWindowLongW(workerw, win.GWL_EXSTYLE, exstyles)
-	
-	// Reparent the window to WorkerW (this puts it behind desktop icons)
 	return workerw;
 }
 
@@ -68,18 +61,11 @@ main :: proc() {
 	SDL.SetHintWithPriority(SDL.HINT_RENDER_DRIVER, "direct3d11", .OVERRIDE)
 	
 
-	native_window := get_wallpaper_window_handle(nil)
-	// window := SDL.CreateWindow("D3D11 in Odin",
-	// 	SDL.WINDOWPOS_CENTERED, SDL.WINDOWPOS_CENTERED,
-	// 	i32(SDL.WINDOW_FULLSCREEN_DESKTOP), i32(SDL.WINDOW_FULLSCREEN_DESKTOP),
-	// 	{.ALLOW_HIGHDPI, .RESIZABLE},
-	// )
-	window := SDL.CreateWindowFrom(native_window)
-	if window == nil {
-		panic("Failed to create window")
-	}
-	SDL.SetWindowFullscreen(window, {._INTERNAL_FULLSCREEN_DESKTOP})
-	SDL.ShowWindow(window)
+	// native_window := get_wallpaper_window_handle(nil)
+	window := SDL.CreateWindow("D3D11 in Odin",
+		0,0,0,0,
+		{.BORDERLESS, .ALWAYS_ON_TOP, .SKIP_TASKBAR}
+	)
 	defer SDL.DestroyWindow(window)
 
 	window_system_info: SDL.SysWMinfo
@@ -87,8 +73,81 @@ main :: proc() {
 	SDL.GetWindowWMInfo(window, &window_system_info)
 	assert(window_system_info.subsystem == .WINDOWS)
 
-	// native_window := DXGI.HWND(window_system_info.info.win.window)
+	native_window := DXGI.HWND(window_system_info.info.win.window)
     fmt.println("win32 main window handle: ", native_window)
+
+	// Store the window's original rect before modifying styles
+	// This is needed for proper positioning after reparenting
+	originalRect: win.RECT;
+	win.GetWindowRect(native_window, &originalRect);
+	fmt.println("Original window rect: left=", originalRect.left, " top=", originalRect.top, " right=", originalRect.right, " bottom=", originalRect.bottom)
+
+	exstyles := win.GetWindowLongW(native_window, win.GWL_EXSTYLE)
+	exstyles |= i32(win.WS_EX_LAYERED) // useful for transparency, but we don't want it here
+	// exstyles |= i32(win.WS_EX_TRANSPARENT)
+	exstyles |= i32(win.WS_EX_TOOLWINDOW | win.WS_EX_NOACTIVATE)
+	win.SetWindowLongW(native_window, win.GWL_EXSTYLE, exstyles)
+
+	LWA_COLORKEY :: 0x00000001 // Missing flag
+	win.SetLayeredWindowAttributes(native_window, 0x00000000, 0, LWA_COLORKEY)
+
+
+	
+	desktopHWND: win.HWND = get_worker_handle(native_window);
+	// window_enum_proc :: proc "stdcall" (tophandle: win.HWND, lparam: win.LPARAM) -> win.BOOL {
+	// 	shellView : win.HWND = win.FindWindowExW(tophandle, nil, "SHELLDLL_DefView", nil)
+	// 	if shellView != nil {
+	// 		result : ^win.HWND = (^win.HWND)(uintptr(lparam))
+	// 		result^ = tophandle
+	// 		return win.FALSE
+	// 	}
+	// 	return win.TRUE
+	// }
+	// win.EnumWindows(window_enum_proc, win.LPARAM(uintptr(&desktopHWND)))
+	// // layering is not working, parenting is possibly incorrect
+	// fmt.println("desktopHWND: ", desktopHWND)
+	// if desktopHWND == nil {
+	// 	panic("Failed to find desktopHWND")
+	// }
+	
+	desktopWidth: i32 = 0;
+	desktopHeight: i32 = 0;
+
+	if (desktopHWND != nil) {
+		// Force get raw desktop size in physical pixels, not scaled for DPI
+		desktopWidth  = i32(win.GetSystemMetrics(win.SM_CXSCREEN));
+		desktopHeight = i32(win.GetSystemMetrics(win.SM_CYSCREEN));
+		dpi := win.GetDpiForWindow(native_window);
+		fmt.println("dpi: ", dpi, " (Ignoring for fullscreen)")
+
+
+		fmt.println("desktopWidth: ", desktopWidth, " desktopHeight: ", desktopHeight)
+		// Set window size and position via SDL before reparenting
+		SDL.SetWindowSize(window, desktopWidth, desktopHeight);
+		SDL.SetWindowPosition(window, 0, 0);
+
+		// Now reparent to the desktop
+		win.SetParent(native_window, desktopHWND);
+		win.SetWindowLongW(native_window, win.GWL_STYLE, i32(win.WS_CHILD | win.WS_VISIBLE));
+
+		// After reparenting, adjust position and size with the +10 height hack
+		// According to the article, this adjustment is needed for proper rendering
+		// Move to position 0, originalRect.top with width originalRect.right and height originalRect.bottom + 10
+		win.MoveWindow(native_window, 0, originalRect.top, originalRect.right, originalRect.bottom + 10, false);
+
+		// Then move it to cover the entire desktop (this is the final desired position)
+		win.MoveWindow(native_window, 0, 0, desktopWidth, desktopHeight, false);
+	}
+
+	renderer := SDL.CreateRenderer(window, -1, SDL.RENDERER_ACCELERATED)
+
+	if renderer == nil {
+		panic("Failed to create renderer")
+	}
+	defer SDL.DestroyRenderer(renderer)
+
+	SDL.RenderSetLogicalSize(renderer, desktopWidth, desktopHeight);
+	SDL.RenderSetIntegerScale(renderer, true);
 
 	feature_levels := [?]D3D11.FEATURE_LEVEL{._11_0}
 
