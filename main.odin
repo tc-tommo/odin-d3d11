@@ -115,8 +115,8 @@ main :: proc() {
 
 	if (desktopHWND != nil) {
 		// Force get raw desktop size in physical pixels, not scaled for DPI
-		desktopWidth  = i32(win.GetSystemMetrics(win.SM_CXSCREEN));
-		desktopHeight = i32(win.GetSystemMetrics(win.SM_CYSCREEN));
+		desktopWidth  = i32(win.GetSystemMetrics(win.SM_CXSCREEN))*3;
+		desktopHeight = i32(win.GetSystemMetrics(win.SM_CYSCREEN))*3;
 		dpi := win.GetDpiForWindow(native_window);
 		fmt.println("dpi: ", dpi, " (Ignoring for fullscreen)")
 
