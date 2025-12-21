@@ -1,6 +1,7 @@
 package d3d11_main
 
 import "core:fmt"
+import "core:mem"
 
 import D3D11 "vendor:directx/d3d11"
 import DXGI "vendor:directx/dxgi"
@@ -10,8 +11,10 @@ import glm "core:math/linalg/glsl"
 import win "core:sys/windows"
 import strings "core:strings"
 
-// Based off https://gist.github.com/d7samurai/261c69490cce0620d0bfc93003cd1052
+CYCLE_SPEED :: 0.00125;
 
+
+// Based off https://gist.github.com/d7samurai/261c69490cce0620d0bfc93003cd1052
 
 /*
   Reparent a window to the bottommost visible window in the desktop (i.e. on the desktop wallpaper)
@@ -99,7 +102,7 @@ main :: proc() {
 	desktopHWND: win.HWND = get_worker_handle(native_window);
 	
 	// Get desktop size in physical pixels using EnumDisplaySettings (non-DPI-aware)
-	desktopWidth: u32 = 0
+	desktopWidth : u32 = 0
 	desktopHeight: u32 = 0
 
 	// Use EnumDisplaySettings to get actual physical resolution avoiding DPI scaling
@@ -224,15 +227,27 @@ main :: proc() {
 	sampler_state: ^D3D11.ISamplerState
 	device->CreateSamplerState(&sampler_desc, &sampler_state)
 
-
 	pixel_data:	   []u8 = #load("raw/V01.bin")
 	palette_data:  []u8 = #load("raw/V01_palette.bin")
-
+	cycle_data:    []u8 = #load("raw/V01.cycles")
 	
+	cycle_struct :: struct { rate: i16, low: u8, high: u8 }
+	cycles: []cycle_struct = transmute([]cycle_struct)cycle_data;
+
+	lows  : [16]u8;
+	highs : [16]u8;
+	rates : [16]i16;
+	for i in 0..<16 {
+		lows[i]  = cycles[i].low;
+		highs[i] = cycles[i].high;
+		rates[i] = cycles[i].rate;
+	}
+
 	// Debug: Check file size and sample values
 	fmt.printf("Loaded pixel data: %d bytes (expected: %d)\n", len(pixel_data), TEXTURE_WIDTH * TEXTURE_HEIGHT)
 
-	texture_desc := D3D11.TEXTURE2D_DESC{
+	// Create main pixel data texture (shared by all cycles)
+	pixel_texture_desc := D3D11.TEXTURE2D_DESC{
 		Width      = TEXTURE_WIDTH,
 		Height     = TEXTURE_HEIGHT,
 		MipLevels  = 1,
@@ -243,16 +258,16 @@ main :: proc() {
 		BindFlags  = {.SHADER_RESOURCE},
 	}
 
-	init_data := D3D11.SUBRESOURCE_DATA{
+	pixel_init_data := D3D11.SUBRESOURCE_DATA{
 		pSysMem     = &pixel_data[0],
 		SysMemPitch = TEXTURE_WIDTH,
 	}
 
-	texture: ^D3D11.ITexture2D
-	device->CreateTexture2D(&texture_desc, &init_data, &texture)
+	pixel_texture: ^D3D11.ITexture2D
+	device->CreateTexture2D(&pixel_texture_desc, &pixel_init_data, &pixel_texture)
 
-	texture_view: ^D3D11.IShaderResourceView
-	device->CreateShaderResourceView(texture, nil, &texture_view)
+	pixel_texture_view: ^D3D11.IShaderResourceView
+	device->CreateShaderResourceView(pixel_texture, nil, &pixel_texture_view)
 
 	// Create palette texture
 	PALETTE_SIZE :: 256 // Typically 256 colors
@@ -263,7 +278,7 @@ main :: proc() {
 		Height     = 1,
 		MipLevels  = 1,
 		ArraySize  = 1,
-		Format     = .R8G8B8A8_UNORM,
+		Format     = .B8G8R8X8_UNORM,
 		SampleDesc = {Count = 1},
 		Usage      = .IMMUTABLE,
 		BindFlags  = {.SHADER_RESOURCE},
@@ -280,6 +295,46 @@ main :: proc() {
 	palette_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
 
+	// Create constant buffer for time
+	TimeBuffer :: struct #align(16) {
+		cycle_time: [16]f32,
+	}
+	
+	time_buffer_desc := D3D11.BUFFER_DESC{
+		ByteWidth      = u32(size_of(TimeBuffer)),
+		Usage          = .DYNAMIC,
+		BindFlags      = {.CONSTANT_BUFFER},
+		CPUAccessFlags = {.WRITE},
+	}
+	
+	time_buffer: ^D3D11.IBuffer
+	device->CreateBuffer(&time_buffer_desc, nil, &time_buffer)
+
+	// Create constant buffer for cycles (lows, highs, rates)
+	CycleBuffer :: struct #align(16) {
+		c_range: [16]u32, // u32 is the smallest supported uint in dx11
+	}
+	
+	cycle_buffer_data := CycleBuffer{}
+	for i in 0..<16 {
+		cycle_buffer_data.c_range[i] = u32(lows[i]) | u32(highs[i]) << 8
+	}
+
+	
+	cycle_buffer_desc := D3D11.BUFFER_DESC{
+		ByteWidth      = u32(size_of(CycleBuffer)),
+		Usage          = .IMMUTABLE, // Static data, won't change
+		BindFlags      = {.CONSTANT_BUFFER},
+		CPUAccessFlags = {},
+	}
+	
+	cycle_init_data := D3D11.SUBRESOURCE_DATA{
+		pSysMem = &cycle_buffer_data,
+	}
+	
+	cycle_buffer: ^D3D11.IBuffer
+	device->CreateBuffer(&cycle_buffer_desc, &cycle_init_data, &cycle_buffer)
+
 	///////////////////////////////////////////////////////////////////////////////////////////////
 
 	framebuffer_desc: D3D11.TEXTURE2D_DESC
@@ -292,6 +347,7 @@ main :: proc() {
 	}
 
 	SDL.ShowWindow(window)
+	start_time : u32 = SDL.GetTicks()
 	for quit := false; !quit; {
 		for e: SDL.Event; SDL.PollEvent(&e); {
 			#partial switch e.type {
@@ -304,6 +360,23 @@ main :: proc() {
 			}
 		}
 
+		// Update time uniform
+		current_time := f32(SDL.GetTicks() - start_time) // milliseconds uint
+
+		// Convert milliseconds to seconds (starting point)
+		seconds := f32(current_time) / 1000.0
+
+		time_data: TimeBuffer
+		for i in 0..<16 {
+			time_data.cycle_time[i] = seconds * f32(rates[i]) * CYCLE_SPEED
+			// fmt.println("cycle_time[", i, "]: ", time_data.cycle_time[i])
+		}
+		
+		mapped_resource: D3D11.MAPPED_SUBRESOURCE
+		device_context->Map(time_buffer, 0, .WRITE_DISCARD, {}, &mapped_resource)
+		mem.copy(mapped_resource.pData, &time_data, size_of(TimeBuffer))
+		device_context->Unmap(time_buffer, 0)
+
 		device_context->ClearRenderTargetView(framebuffer_view, &[4]f32{0, 0, 0, 1})
 
 		device_context->IASetPrimitiveTopology(.TRIANGLESTRIP)
@@ -315,7 +388,11 @@ main :: proc() {
 		device_context->RSSetState(rasterizer_state)
 
 		device_context->PSSetShader(pixel_shader, nil, 0)
-		device_context->PSSetShaderResources(0, 1, &texture_view)
+		device_context->PSSetConstantBuffers(0, 1, &time_buffer) // Bind time constant buffer (b0)
+		device_context->PSSetConstantBuffers(1, 1, &cycle_buffer) // Bind cycle constant buffer (b1)
+		// Bind pixel texture (t0) and palette texture (t1)
+
+		device_context->PSSetShaderResources(0, 1, &pixel_texture_view)
 		device_context->PSSetShaderResources(1, 1, &palette_texture_view)
 		device_context->PSSetSamplers(0, 1, &sampler_state)
 
@@ -328,30 +405,4 @@ main :: proc() {
 	}
 }
 
-shaders_hlsl := `
-Texture2D tex0 : register(t0);
-Texture2D palette : register(t1);
-SamplerState samp0 : register(s0);
-
-struct VSOut {
-    float4 pos : SV_POSITION;
-    float2 uv  : TEXCOORD;
-};
-
-VSOut vs_main(uint id : SV_VertexID)
-{
-    float2 pos[4] = {float2(-1,1), float2(1,1), float2(-1,-1), float2(1,-1)};
-    float2 uv[4]  = {float2(0,0), float2(1,0), float2(0,1), float2(1,1)};
-    VSOut o;
-    o.pos = float4(pos[id], 0, 1);
-    o.uv  = uv[id];
-    return o;
-}
-
-float4 ps_main(VSOut i) : SV_TARGET
-{
-    float g = tex0.Sample(samp0, i.uv).r;
-    float4 color = palette.Sample(samp0, float2(g, 0));
-    return float4(color.bgra);
-}
-`
+shaders_hlsl := #load("shader.hlsl")
