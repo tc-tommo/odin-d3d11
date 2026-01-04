@@ -43,7 +43,7 @@ float4 ps_main(VSOut i) : SV_TARGET
     // Sample pixel index from the pixel texture
     int pixel = int(pixelTex.Sample(samp0, i.uv).r * 255.0);
 
-    if (i.uv.y < 0.1)
+    if (i.uv.y < 1.0/480.0)
         pixel = int(i.uv.x * 255.0);
     // start at 8, (middle)
     int cycle_idx = 0;
