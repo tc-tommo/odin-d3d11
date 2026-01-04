@@ -60,17 +60,14 @@ float4 ps_main(VSOut i) : SV_TARGET
 
     int cticks = ticks * RATE(cycle_idx);
 
-
     int shift = 20;
-    // should be [LOW, HIGH)
-    int macrotick = LOW(cycle_idx) + ((pixel - LOW(cycle_idx) - (cticks >> shift)) % (HIGH(cycle_idx) - LOW(cycle_idx)));
-    
-    // should be [0, 1)
-    float microtick = ldexp(float(cticks & (1 << shift - 1)), -float(shift));
+    int cycle_size = HIGH(cycle_idx) - LOW(cycle_idx) + 1;
+    int position_in_cycle = pixel - LOW(cycle_idx);
+    int current_offset = (position_in_cycle - (cticks >> shift)) % cycle_size;
+    if (current_offset < 0) current_offset += cycle_size;
 
-
-
-
-    return palette.Load(uint3(macrotick, 0, 0));
-    
+    int macrotick = LOW(cycle_idx) + current_offset;
+    int next_macrotick = LOW(cycle_idx) + ((current_offset + 1) % cycle_size);
+    float microtick = float(cticks & ((1 << shift) - 1)) / float((1 << shift));
+    return lerp(palette.Load(uint3(macrotick, 0, 0)), palette.Load(uint3(next_macrotick, 0, 0)), 1.0 - microtick);
 }
