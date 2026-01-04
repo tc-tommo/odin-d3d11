@@ -204,6 +204,7 @@ main :: proc() {
 
 	ps_blob: ^D3D11.IBlob
 	D3D.Compile(raw_data(shaders_hlsl), len(shaders_hlsl), "shaders.hlsl", nil, nil, "ps_main", "ps_5_0", 0, 0, &ps_blob, nil)
+	assert(ps_blob != nil)
 
 	pixel_shader: ^D3D11.IPixelShader
 	device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nil, &pixel_shader)
@@ -243,9 +244,10 @@ main :: proc() {
 		rates[i] = cycles[i].rate;
 	}
 
-	// Debug: Check file size and sample values
-	fmt.printf("Loaded pixel data: %d bytes (expected: %d)\n", len(pixel_data), TEXTURE_WIDTH * TEXTURE_HEIGHT)
-
+	fmt.println("lows: ", lows)
+	fmt.println("highs: ", highs)
+	fmt.println("rates: ", rates)
+	
 	// Create main pixel data texture (shared by all cycles)
 	pixel_texture_desc := D3D11.TEXTURE2D_DESC{
 		Width      = TEXTURE_WIDTH,
@@ -295,34 +297,26 @@ main :: proc() {
 	palette_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
 
-	// Create constant buffer for time
-	TimeBuffer :: struct #align(16) {
-		cycle_time: [16]f32,
-	}
-	
-	time_buffer_desc := D3D11.BUFFER_DESC{
-		ByteWidth      = u32(size_of(TimeBuffer)),
-		Usage          = .DYNAMIC,
-		BindFlags      = {.CONSTANT_BUFFER},
-		CPUAccessFlags = {.WRITE},
-	}
-	
-	time_buffer: ^D3D11.IBuffer
-	device->CreateBuffer(&time_buffer_desc, nil, &time_buffer)
-
 	// Create constant buffer for cycles (lows, highs, rates)
 	CycleBuffer :: struct #align(16) {
-		c_range: [16]u32, // u32 is the smallest supported uint in dx11
-	}
-	
-	cycle_buffer_data := CycleBuffer{}
-	for i in 0..<16 {
-		cycle_buffer_data.c_range[i] = u32(lows[i]) | u32(highs[i]) << 8
+		c_low: u32,
+		c_high: u32,
+		c_rate: i32,
+		_pad: u32,
 	}
 
+	fmt.println("buffer size: ", size_of(CycleBuffer))
+
+	cycle_buffer_data: [16]CycleBuffer
+	for i in 0..<16 {
+		cycle_buffer_data[i].c_low = u32(lows[i])
+		cycle_buffer_data[i].c_high = u32(highs[i])
+		cycle_buffer_data[i].c_rate = i32(rates[i])
+		cycle_buffer_data[i]._pad = 0
+	}
 	
 	cycle_buffer_desc := D3D11.BUFFER_DESC{
-		ByteWidth      = u32(size_of(CycleBuffer)),
+		ByteWidth      = u32(size_of([16]CycleBuffer)),
 		Usage          = .IMMUTABLE, // Static data, won't change
 		BindFlags      = {.CONSTANT_BUFFER},
 		CPUAccessFlags = {},
@@ -347,8 +341,10 @@ main :: proc() {
 	}
 
 	SDL.ShowWindow(window)
-	start_time : u32 = SDL.GetTicks()
+
+	frame_count : u32 = 0
 	for quit := false; !quit; {
+		frame_count += 1
 		for e: SDL.Event; SDL.PollEvent(&e); {
 			#partial switch e.type {
 			case .QUIT:
@@ -360,22 +356,7 @@ main :: proc() {
 			}
 		}
 
-		// Update time uniform
-		current_time := f32(SDL.GetTicks() - start_time) // milliseconds uint
-
-		// Convert milliseconds to seconds (starting point)
-		seconds := f32(current_time) / 1000.0
-
-		time_data: TimeBuffer
-		for i in 0..<16 {
-			time_data.cycle_time[i] = seconds * f32(rates[i]) * CYCLE_SPEED
-			// fmt.println("cycle_time[", i, "]: ", time_data.cycle_time[i])
-		}
-		
-		mapped_resource: D3D11.MAPPED_SUBRESOURCE
-		device_context->Map(time_buffer, 0, .WRITE_DISCARD, {}, &mapped_resource)
-		mem.copy(mapped_resource.pData, &time_data, size_of(TimeBuffer))
-		device_context->Unmap(time_buffer, 0)
+		current_time := SDL.GetTicks() // milliseconds uint
 
 		device_context->ClearRenderTargetView(framebuffer_view, &[4]f32{0, 0, 0, 1})
 
@@ -388,8 +369,7 @@ main :: proc() {
 		device_context->RSSetState(rasterizer_state)
 
 		device_context->PSSetShader(pixel_shader, nil, 0)
-		device_context->PSSetConstantBuffers(0, 1, &time_buffer) // Bind time constant buffer (b0)
-		device_context->PSSetConstantBuffers(1, 1, &cycle_buffer) // Bind cycle constant buffer (b1)
+		device_context->PSSetConstantBuffers(0, 1, &cycle_buffer) // Bind cycle constant buffer (b0)
 		// Bind pixel texture (t0) and palette texture (t1)
 
 		device_context->PSSetShaderResources(0, 1, &pixel_texture_view)

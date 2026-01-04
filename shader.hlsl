@@ -2,29 +2,21 @@ Texture2D pixelTex : register(t0);
 Texture2D palette  : register(t1);
 SamplerState samp0 : register(s0);
 
-#define HALF_PIXEL 0.001953125f // 0.5/255
-
-#define CYCLE_SPEED 0.00125f // 1/8192
-
-cbuffer TimeBuffer : register(b0) {
-    float cycle_time[16];
+struct CycleBuffer {
+    uint c_low;
+    uint c_high;
+    int c_rate;
+    uint _pad; // pad
 };
 
-cbuffer CycleBuffer : register(b1) {
-    // Cycles are jagged and disjoint
-    // [...:16, high_idx:8, low_idx:8] ==> (high_idx << 8 + low_idx)
-    uint c_range [16];  // range of k
-
-    #define low(j) (c_range[j] & 0xFF)
-    #define high(j) (c_range[j] >> 8)
+cbuffer CycleBufferCB : register(b0) {
+    CycleBuffer cycle_buffer[16];
 };
 
 struct VSOut {
     float4 pos : SV_POSITION;
     float2 uv  : TEXCOORD;
 };
-
-
 
 VSOut vs_main(uint id : SV_VertexID)
 {
@@ -36,40 +28,49 @@ VSOut vs_main(uint id : SV_VertexID)
     return o;
 }
 
+
+
 float4 ps_main(VSOut i) : SV_TARGET
 {
+
+    #define LOW(index) (cycle_buffer[index].c_low)
+    #define HIGH(index) (cycle_buffer[index].c_high)
+    #define RATE(index) (cycle_buffer[index].c_rate)
+
     // Sample pixel index from the pixel texture
-
-    
-
     int pixel = int(pixelTex.Sample(samp0, i.uv).r * 255.0);
 
-    // debug: pixel
-    if (i.uv.y < 0.05) {
-        pixel = int(i.uv.x * 255.0);
+    // start at 8, (middle)
+    int cycle_idx = 0;
+
+    // small and concise binary search (hardcoded for 16 cycle values)
+    // j ==> the subindex level going from 8 (top level) to 1 (item level)
+    for (int j = 8; j != 0; j >>= 1) {
+        cycle_idx |= (pixel >= LOW(cycle_idx | j)) ? j : 0;
     }
-    // Loop through cycles to find if this pixel is in a cycle range
 
-    for (int j = 0; j < 16; j++) {
-        // monotonic --> break if low 
-        if (pixel < low(j)) break;
-        if (pixel <= high(j)) {
-            // get cycle progress as an integer normalised to the cycle range
-            int   cycle_progress_int    = int(floor(frac(cycle_time[j]) * float(high(j) - low(j) + 1)));
-            int cycle_index = cycle_progress_int + pixel;
-            if (cycle_index < low(j)) cycle_index = high(j) - (low(j) - cycle_index);
-            // load the colors with the macro timing
-            float color1 = palette.Load(uint3(cycle_index, 0, 0));
-            int next_index = ++cycle_index <= high(j) ? cycle_index : low(j);
-
-            float color2 = palette.Load(uint3(next_index, 0, 0));
-
-            // lerp it with the fractional part
-            float cycle_progress_frac   = frac(cycle_time[j]);
-            return lerp(color1, color2, cycle_progress_frac);
-        }
+    if (pixel < LOW(cycle_idx) || pixel > HIGH(cycle_idx)) {
+        return palette.Load(uint3(pixel, 0, 0));
     }
-    
-    // Not in any cycle, load palette directly
-    return palette.Load(uint3(pixel, 0, 0));
+
+    float4 debug_color[16] = {
+        float4(0, 1, 0, 1),
+        float4(0, 0, 0.5, 1),
+        float4(0, 0, 1, 1),
+        float4(0, 0.5, 1, 1),
+        float4(0, 1, 1, 1),
+        float4(0.5, 1, 1, 1),
+        float4(1, 1, 1, 1),
+        float4(1, 1, 0.5, 1),
+        float4(1, 1, 0, 1),
+        float4(1, 0.5, 0, 1),
+        float4(1, 0, 0, 1),
+        float4(0.5, 0, 0, 1),
+        float4(0, 0, 0, 1),
+        float4(0, 0, 0.5, 1),
+        float4(0, 0, 1, 1),
+        float4(0, 0.5, 1, 1)
+    };  
+
+    return debug_color[cycle_idx];
 }
