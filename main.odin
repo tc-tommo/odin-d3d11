@@ -237,11 +237,11 @@ main :: proc() {
 
 	lows  : [16]u8;
 	highs : [16]u8;
-	rates : [16]i16;
+	rates : [16]u32;
 	for i in 0..<16 {
 		lows[i]  = cycles[i].low;
 		highs[i] = cycles[i].high;
-		rates[i] = cycles[i].rate;
+		rates[i] = u32(cycles[i].rate);
 	}
 
 	fmt.println("lows: ", lows)
@@ -297,12 +297,26 @@ main :: proc() {
 	palette_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
 
+	// Create constant buffer for time
+	TicksBuffer :: struct #align(16) {
+		ticks: u32,
+	}
+	
+	time_buffer_desc := D3D11.BUFFER_DESC{
+		ByteWidth      = u32(size_of(TicksBuffer)),
+		Usage          = .DYNAMIC,
+		BindFlags      = {.CONSTANT_BUFFER},
+		CPUAccessFlags = {.WRITE},
+	}
+	
+	time_buffer: ^D3D11.IBuffer
+	device->CreateBuffer(&time_buffer_desc, nil, &time_buffer)
+
 	// Create constant buffer for cycles (lows, highs, rates)
 	CycleBuffer :: struct #align(16) {
 		c_low: u32,
 		c_high: u32,
-		c_rate: i32,
-		_pad: u32,
+		c_rate: u32,
 	}
 
 	fmt.println("buffer size: ", size_of(CycleBuffer))
@@ -311,8 +325,8 @@ main :: proc() {
 	for i in 0..<16 {
 		cycle_buffer_data[i].c_low = u32(lows[i])
 		cycle_buffer_data[i].c_high = u32(highs[i])
-		cycle_buffer_data[i].c_rate = i32(rates[i])
-		cycle_buffer_data[i]._pad = 0
+		cycle_buffer_data[i].c_rate = rates[i]
+		// cycle_buffer_data[i]._pad = 0
 	}
 	
 	cycle_buffer_desc := D3D11.BUFFER_DESC{
@@ -342,9 +356,9 @@ main :: proc() {
 
 	SDL.ShowWindow(window)
 
-	frame_count : u32 = 0
+	time_ms : u32 = 0
 	for quit := false; !quit; {
-		frame_count += 1
+		
 		for e: SDL.Event; SDL.PollEvent(&e); {
 			#partial switch e.type {
 			case .QUIT:
@@ -356,7 +370,16 @@ main :: proc() {
 			}
 		}
 
-		current_time := SDL.GetTicks() // milliseconds uint
+		current_time := SDL.GetTicks()
+
+		// Update time buffer
+		time_data: TicksBuffer
+		time_data.ticks = current_time
+		
+		mapped_resource: D3D11.MAPPED_SUBRESOURCE
+		device_context->Map(time_buffer, 0, .WRITE_DISCARD, {}, &mapped_resource)
+		mem.copy(mapped_resource.pData, &time_data, size_of(TicksBuffer))
+		device_context->Unmap(time_buffer, 0)
 
 		device_context->ClearRenderTargetView(framebuffer_view, &[4]f32{0, 0, 0, 1})
 
@@ -370,6 +393,7 @@ main :: proc() {
 
 		device_context->PSSetShader(pixel_shader, nil, 0)
 		device_context->PSSetConstantBuffers(0, 1, &cycle_buffer) // Bind cycle constant buffer (b0)
+		device_context->PSSetConstantBuffers(1, 1, &time_buffer) // Bind time constant buffer (b1)
 		// Bind pixel texture (t0) and palette texture (t1)
 
 		device_context->PSSetShaderResources(0, 1, &pixel_texture_view)

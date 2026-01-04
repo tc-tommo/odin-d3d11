@@ -5,12 +5,15 @@ SamplerState samp0 : register(s0);
 struct CycleBuffer {
     uint c_low;
     uint c_high;
-    int c_rate;
-    uint _pad; // pad
+    uint c_rate;
 };
 
 cbuffer CycleBufferCB : register(b0) {
     CycleBuffer cycle_buffer[16];
+};
+
+cbuffer TicksBuffer : register(b1) {
+    uint ticks;
 };
 
 struct VSOut {
@@ -33,13 +36,15 @@ VSOut vs_main(uint id : SV_VertexID)
 float4 ps_main(VSOut i) : SV_TARGET
 {
 
-    #define LOW(index) (cycle_buffer[index].c_low)
+    #define LOW(index)  (cycle_buffer[index].c_low)
     #define HIGH(index) (cycle_buffer[index].c_high)
     #define RATE(index) (cycle_buffer[index].c_rate)
 
     // Sample pixel index from the pixel texture
     int pixel = int(pixelTex.Sample(samp0, i.uv).r * 255.0);
 
+    if (i.uv.y < 0.1)
+        pixel = int(i.uv.x * 255.0);
     // start at 8, (middle)
     int cycle_idx = 0;
 
@@ -53,24 +58,19 @@ float4 ps_main(VSOut i) : SV_TARGET
         return palette.Load(uint3(pixel, 0, 0));
     }
 
-    float4 debug_color[16] = {
-        float4(0, 1, 0, 1),
-        float4(0, 0, 0.5, 1),
-        float4(0, 0, 1, 1),
-        float4(0, 0.5, 1, 1),
-        float4(0, 1, 1, 1),
-        float4(0.5, 1, 1, 1),
-        float4(1, 1, 1, 1),
-        float4(1, 1, 0.5, 1),
-        float4(1, 1, 0, 1),
-        float4(1, 0.5, 0, 1),
-        float4(1, 0, 0, 1),
-        float4(0.5, 0, 0, 1),
-        float4(0, 0, 0, 1),
-        float4(0, 0, 0.5, 1),
-        float4(0, 0, 1, 1),
-        float4(0, 0.5, 1, 1)
-    };  
+    int cticks = ticks * RATE(cycle_idx);
 
-    return debug_color[cycle_idx];
+
+    int shift = 20;
+    // should be [LOW, HIGH)
+    int macrotick = LOW(cycle_idx) + ((pixel - LOW(cycle_idx) - (cticks >> shift)) % (HIGH(cycle_idx) - LOW(cycle_idx)));
+    
+    // should be [0, 1)
+    float microtick = ldexp(float(cticks & (1 << shift - 1)), -float(shift));
+
+
+
+
+    return palette.Load(uint3(macrotick, 0, 0));
+    
 }
