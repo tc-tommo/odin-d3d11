@@ -43,7 +43,7 @@ float4 ps_main(VSOut i) : SV_TARGET
     // Sample pixel index from the pixel texture
     int pixel = int(pixelTex.Sample(samp0, i.uv).r * 255.0);
 
-    if (i.uv.y < 1.0/480.0)
+    if (i.uv.y < 1.0/240.0)
         pixel = int(i.uv.x * 255.0);
     // start at 8, (middle)
     int cycle_idx = 0;
@@ -60,14 +60,30 @@ float4 ps_main(VSOut i) : SV_TARGET
 
     int cticks = ticks * RATE(cycle_idx);
 
-    int shift = 20;
+    #define SHIFT 20
+    #define MASK 0xFFFFF
+    
     int cycle_size = HIGH(cycle_idx) - LOW(cycle_idx) + 1;
     int position_in_cycle = pixel - LOW(cycle_idx);
-    int current_offset = (position_in_cycle - (cticks >> shift)) % cycle_size;
+    
+    int current_offset = (position_in_cycle - (cticks >> SHIFT)) % cycle_size;
     if (current_offset < 0) current_offset += cycle_size;
 
     int macrotick = LOW(cycle_idx) + current_offset;
-    int next_macrotick = LOW(cycle_idx) + ((current_offset + 1) % cycle_size);
-    float microtick = float(cticks & ((1 << shift) - 1)) / float((1 << shift));
-    return lerp(palette.Load(uint3(macrotick, 0, 0)), palette.Load(uint3(next_macrotick, 0, 0)), 1.0 - microtick);
+    float4 color = palette.Load(uint3(macrotick, 0, 0));
+
+    if (--macrotick < LOW(cycle_idx)) macrotick = HIGH(cycle_idx);
+
+    float4 next_color = palette.Load(uint3(macrotick, 0, 0));
+    float microtick = ldexp(float(cticks & MASK), -SHIFT);
+    return lerp(color, next_color, microtick);
+}
+
+// Simple upscale shader for pass 2
+Texture2D upscaleTex : register(t0);
+SamplerState upscaleSamp : register(s0);
+
+float4 upscale_ps_main(VSOut i) : SV_TARGET
+{
+    return upscaleTex.Sample(upscaleSamp, i.uv);
 }

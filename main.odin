@@ -62,6 +62,9 @@ TEXTURE_WIDTH  :: 640
 TEXTURE_HEIGHT :: 480
 
 main :: proc() {
+	// Allocate console for FPS diagnostics
+	win.AllocConsole()
+	
 	SDL.Init({.VIDEO})
 	defer SDL.Quit()
 
@@ -96,8 +99,6 @@ main :: proc() {
 
 	LWA_COLORKEY :: 0x00000001 // Missing flag
 	win.SetLayeredWindowAttributes(native_window, 0x00000000, 0, LWA_COLORKEY)
-
-
 	
 	desktopHWND: win.HWND = get_worker_handle(native_window);
 	
@@ -209,6 +210,13 @@ main :: proc() {
 	pixel_shader: ^D3D11.IPixelShader
 	device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nil, &pixel_shader)
 
+	upscale_ps_blob: ^D3D11.IBlob
+	D3D.Compile(raw_data(shaders_hlsl), len(shaders_hlsl), "shaders.hlsl", nil, nil, "upscale_ps_main", "ps_5_0", 0, 0, &upscale_ps_blob, nil)
+	assert(upscale_ps_blob != nil)
+
+	upscale_pixel_shader: ^D3D11.IPixelShader
+	device->CreatePixelShader(upscale_ps_blob->GetBufferPointer(), upscale_ps_blob->GetBufferSize(), nil, &upscale_pixel_shader)
+
 	///////////////////////////////////////////////////////////////////////////////////////////////
 
 	rasterizer_desc := D3D11.RASTERIZER_DESC{
@@ -220,9 +228,9 @@ main :: proc() {
 
 	sampler_desc := D3D11.SAMPLER_DESC{
 		Filter         = .MIN_MAG_MIP_POINT,
-		AddressU       = .WRAP,
-		AddressV       = .WRAP,
-		AddressW       = .WRAP,
+		AddressU       = .CLAMP, // CLAMP is better for pixel art upscaling
+		AddressV       = .CLAMP,
+		AddressW       = .CLAMP,
 		ComparisonFunc = .NEVER,
 	}
 	sampler_state: ^D3D11.ISamplerState
@@ -297,6 +305,38 @@ main :: proc() {
 	palette_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
 
+	// Create intermediate render target at texture resolution for efficient rendering
+	intermediate_texture_desc := D3D11.TEXTURE2D_DESC{
+		Width      = TEXTURE_WIDTH,
+		Height     = TEXTURE_HEIGHT,
+		MipLevels  = 1,
+		ArraySize  = 1,
+		Format     = .R8G8B8A8_UNORM,
+		SampleDesc = {Count = 1},
+		Usage      = .DEFAULT,
+		BindFlags  = {.RENDER_TARGET, .SHADER_RESOURCE},
+	}
+
+	intermediate_texture: ^D3D11.ITexture2D
+	device->CreateTexture2D(&intermediate_texture_desc, nil, &intermediate_texture)
+
+	intermediate_rtv: ^D3D11.IRenderTargetView
+	device->CreateRenderTargetView(intermediate_texture, nil, &intermediate_rtv)
+
+	intermediate_srv: ^D3D11.IShaderResourceView
+	device->CreateShaderResourceView(intermediate_texture, nil, &intermediate_srv)
+
+	// Create linear sampler for smooth upscaling
+	linear_sampler_desc := D3D11.SAMPLER_DESC{
+		Filter         = .MIN_MAG_MIP_LINEAR,
+		AddressU       = .CLAMP,
+		AddressV       = .CLAMP,
+		AddressW       = .CLAMP,
+		ComparisonFunc = .NEVER,
+	}
+	linear_sampler_state: ^D3D11.ISamplerState
+	device->CreateSamplerState(&linear_sampler_desc, &linear_sampler_state)
+
 	// Create constant buffer for time
 	TicksBuffer :: struct #align(16) {
 		ticks: u32,
@@ -357,6 +397,11 @@ main :: proc() {
 	SDL.ShowWindow(window)
 
 	time_ms : u32 = 0
+	
+	// FPS counter variables
+	fps_frame_count: u32 = 0
+	fps_last_update: u32 = SDL.GetTicks()
+	
 	for quit := false; !quit; {
 		
 		for e: SDL.Event; SDL.PollEvent(&e); {
@@ -372,6 +417,16 @@ main :: proc() {
 
 		current_time := SDL.GetTicks()
 
+		// Update FPS counter
+		fps_frame_count += 1
+		elapsed_since_update := current_time - fps_last_update
+		if elapsed_since_update >= 1000 {
+			fps := fps_frame_count
+			fmt.printf("\rFPS: %d   ", fps)
+			fps_frame_count = 0
+			fps_last_update = current_time
+		}
+
 		// Update time buffer
 		time_data: TicksBuffer
 		time_data.ticks = current_time
@@ -381,31 +436,48 @@ main :: proc() {
 		mem.copy(mapped_resource.pData, &time_data, size_of(TicksBuffer))
 		device_context->Unmap(time_buffer, 0)
 
-		device_context->ClearRenderTargetView(framebuffer_view, &[4]f32{0, 0, 0, 1})
-
 		device_context->IASetPrimitiveTopology(.TRIANGLESTRIP)
 		device_context->IASetInputLayout(nil)
-
 		device_context->VSSetShader(vertex_shader, nil, 0)
-
-		device_context->RSSetViewports(1, &viewport)
 		device_context->RSSetState(rasterizer_state)
+		device_context->OMSetBlendState(nil, nil, u32(D3D11.COLOR_WRITE_ENABLE_ALL)) // default blend (none)
+
+		// PASS 1: Render to intermediate texture at native resolution (640x480)
+		intermediate_viewport := D3D11.VIEWPORT{
+			0, 0,
+			f32(TEXTURE_WIDTH), f32(TEXTURE_HEIGHT),
+			0, 1,
+		}
+
+		device_context->ClearRenderTargetView(intermediate_rtv, &[4]f32{0, 0, 0, 1})
+		device_context->RSSetViewports(1, &intermediate_viewport)
+		device_context->OMSetRenderTargets(1, &intermediate_rtv, nil)
 
 		device_context->PSSetShader(pixel_shader, nil, 0)
 		device_context->PSSetConstantBuffers(0, 1, &cycle_buffer) // Bind cycle constant buffer (b0)
 		device_context->PSSetConstantBuffers(1, 1, &time_buffer) // Bind time constant buffer (b1)
-		// Bind pixel texture (t0) and palette texture (t1)
-
 		device_context->PSSetShaderResources(0, 1, &pixel_texture_view)
 		device_context->PSSetShaderResources(1, 1, &palette_texture_view)
 		device_context->PSSetSamplers(0, 1, &sampler_state)
 
+		device_context->Draw(4, 0)
+
+		// Unbind intermediate render target before using it as shader resource
+		null_rtv: ^D3D11.IRenderTargetView = nil
+		device_context->OMSetRenderTargets(1, &null_rtv, nil)
+
+		// PASS 2: Upscale intermediate texture to full screen
+		device_context->ClearRenderTargetView(framebuffer_view, &[4]f32{0, 0, 0, 1})
+		device_context->RSSetViewports(1, &viewport)
 		device_context->OMSetRenderTargets(1, &framebuffer_view, nil)
-		device_context->OMSetBlendState(nil, nil, u32(D3D11.COLOR_WRITE_ENABLE_ALL)) // default blend (none)
+
+		device_context->PSSetShader(upscale_pixel_shader, nil, 0)
+		device_context->PSSetShaderResources(0, 1, &intermediate_srv)
+		device_context->PSSetSamplers(0, 1, &sampler_state) // Use point filtering for crisp pixel art
 
 		device_context->Draw(4, 0)
 
-		swapchain->Present(1, {})
+		swapchain->Present(0, {})
 	}
 }
 
