@@ -326,17 +326,6 @@ main :: proc() {
 	intermediate_srv: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(intermediate_texture, nil, &intermediate_srv)
 
-	// Create linear sampler for smooth upscaling
-	linear_sampler_desc := D3D11.SAMPLER_DESC{
-		Filter         = .MIN_MAG_MIP_LINEAR,
-		AddressU       = .CLAMP,
-		AddressV       = .CLAMP,
-		AddressW       = .CLAMP,
-		ComparisonFunc = .NEVER,
-	}
-	linear_sampler_state: ^D3D11.ISamplerState
-	device->CreateSamplerState(&linear_sampler_desc, &linear_sampler_state)
-
 	// Create constant buffer for time
 	TicksBuffer :: struct #align(16) {
 		ticks: u32,

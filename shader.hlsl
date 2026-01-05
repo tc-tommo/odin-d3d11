@@ -81,9 +81,8 @@ float4 ps_main(VSOut i) : SV_TARGET
 
 // Simple upscale shader for pass 2
 Texture2D upscaleTex : register(t0);
-SamplerState upscaleSamp : register(s0);
 
 float4 upscale_ps_main(VSOut i) : SV_TARGET
 {
-    return upscaleTex.Sample(upscaleSamp, i.uv);
+    return upscaleTex.Sample(samp0, i.uv);
 }
