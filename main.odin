@@ -420,7 +420,7 @@ main :: proc() {
 
 		device_context->Draw(4, 0)
 
-		swapchain->Present(1, {})
+		swapchain->Present(0, {})
 	}
 }
 
