@@ -477,7 +477,8 @@ main :: proc() {
 
 		device_context->Draw(4, 0)
 
-		swapchain->Present(0, {})
+		// Disable vsync: sync interval 0 = no wait, DO_NOT_WAIT flag = immediate presentation
+		swapchain->Present(0, {.DO_NOT_WAIT})
 	}
 }
 
