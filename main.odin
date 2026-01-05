@@ -357,6 +357,11 @@ main :: proc() {
 	SDL.ShowWindow(window)
 
 	time_ms : u32 = 0
+	
+	// FPS counter variables
+	fps_frame_count: u32 = 0
+	fps_last_update: u32 = SDL.GetTicks()
+	
 	for quit := false; !quit; {
 		
 		for e: SDL.Event; SDL.PollEvent(&e); {
@@ -371,6 +376,16 @@ main :: proc() {
 		}
 
 		current_time := SDL.GetTicks()
+
+		// Update FPS counter
+		fps_frame_count += 1
+		elapsed_since_update := current_time - fps_last_update
+		if elapsed_since_update >= 1000 {
+			fps := fps_frame_count
+			fmt.printf("\rFPS: %d   ", fps)
+			fps_frame_count = 0
+			fps_last_update = current_time
+		}
 
 		// Update time buffer
 		time_data: TicksBuffer
