@@ -11,9 +11,6 @@ import glm "core:math/linalg/glsl"
 import win "core:sys/windows"
 import strings "core:strings"
 
-CYCLE_SPEED :: 0.00125;
-
-
 // Based off https://gist.github.com/d7samurai/261c69490cce0620d0bfc93003cd1052
 
 /*
@@ -271,7 +268,7 @@ main :: proc() {
 	pixel_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(pixel_texture, nil, &pixel_texture_view)
 
-	// Create palette texture
+	// Create palette texture (dynamic for CPU updates)
 	PALETTE_SIZE :: 256 // Typically 256 colors
 	fmt.printf("Loaded palette data: %d bytes (expected: %d for RGBA)\n", len(palette_data), PALETTE_SIZE * 4)
 
@@ -282,20 +279,19 @@ main :: proc() {
 		ArraySize  = 1,
 		Format     = .B8G8R8X8_UNORM,
 		SampleDesc = {Count = 1},
-		Usage      = .IMMUTABLE,
+		Usage      = .DYNAMIC,
 		BindFlags  = {.SHADER_RESOURCE},
-	}
-
-	palette_init_data := D3D11.SUBRESOURCE_DATA{
-		pSysMem     = &palette_data[0],
-		SysMemPitch = PALETTE_SIZE * 4, // 4 bytes per pixel (RGBA)
+		CPUAccessFlags = {.WRITE},
 	}
 
 	palette_texture: ^D3D11.ITexture2D
-	device->CreateTexture2D(&palette_texture_desc, &palette_init_data, &palette_texture)
+	device->CreateTexture2D(&palette_texture_desc, nil, &palette_texture)
 
 	palette_texture_view: ^D3D11.IShaderResourceView
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
+
+	// CPU-side buffer for cycled palette (BGRX format, 4 bytes per color)
+	cycled_palette: [PALETTE_SIZE * 4]u8
 
 	// Create constant buffer for time
 	TicksBuffer :: struct #align(16) {
@@ -312,36 +308,44 @@ main :: proc() {
 	time_buffer: ^D3D11.IBuffer
 	device->CreateBuffer(&time_buffer_desc, nil, &time_buffer)
 
-	// Create constant buffer for cycles (lows, highs, rates)
-	CycleBuffer :: struct #align(16) {
-		c_low: u32,
-		c_high: u32,
-		c_rate: u32,
+	// Function to compute cycled palette
+	update_cycled_palette :: proc(palette_src: []u8, palette_dst: []u8, lows: []u8, highs: []u8, rates: []u32, ticks: u32) {
+		// Copy original palette
+		mem.copy(&palette_dst[0], &palette_src[0], len(palette_src))
+		
+		// Apply each cycle
+		for cycle_idx in 0..<16 {
+			low := i32(lows[cycle_idx])
+			high := i32(highs[cycle_idx])
+			rate := rates[cycle_idx]
+			
+			if rate == 0 || low > high {
+				continue
+			}
+			
+			cycle_size := high - low + 1
+			cticks := u64(ticks) * u64(rate)
+			
+			shift :: 20
+			cycle_advance := i32((cticks >> shift) % u64(cycle_size))
+			
+			// Remap colors in this cycle range
+			for i in 0..<cycle_size {
+				palette_idx := u8(low + i)
+				position_in_cycle := i32(i)
+				current_offset := (position_in_cycle - cycle_advance + cycle_size) % cycle_size
+				if current_offset < 0 {
+					current_offset += cycle_size
+				}
+				source_idx := u8(low + current_offset)
+				
+				// Copy color from source index to palette index
+				dst_offset := i32(palette_idx) * 4
+				src_offset := i32(source_idx) * 4
+				mem.copy(&palette_dst[dst_offset], &palette_src[src_offset], 4)
+			}
+		}
 	}
-
-	fmt.println("buffer size: ", size_of(CycleBuffer))
-
-	cycle_buffer_data: [16]CycleBuffer
-	for i in 0..<16 {
-		cycle_buffer_data[i].c_low = u32(lows[i])
-		cycle_buffer_data[i].c_high = u32(highs[i])
-		cycle_buffer_data[i].c_rate = rates[i]
-		// cycle_buffer_data[i]._pad = 0
-	}
-	
-	cycle_buffer_desc := D3D11.BUFFER_DESC{
-		ByteWidth      = u32(size_of([16]CycleBuffer)),
-		Usage          = .IMMUTABLE, // Static data, won't change
-		BindFlags      = {.CONSTANT_BUFFER},
-		CPUAccessFlags = {},
-	}
-	
-	cycle_init_data := D3D11.SUBRESOURCE_DATA{
-		pSysMem = &cycle_buffer_data,
-	}
-	
-	cycle_buffer: ^D3D11.IBuffer
-	device->CreateBuffer(&cycle_buffer_desc, &cycle_init_data, &cycle_buffer)
 
 	///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -355,8 +359,6 @@ main :: proc() {
 	}
 
 	SDL.ShowWindow(window)
-
-	time_ms : u32 = 0
 	
 	// FPS counter variables
 	fps_frame_count: u32 = 0
@@ -387,11 +389,19 @@ main :: proc() {
 			fps_last_update = current_time
 		}
 
+		// Update cycled palette
+		update_cycled_palette(palette_data, cycled_palette[:], lows[:], highs[:], rates[:], current_time)
+		
+		// Update palette texture
+		mapped_resource: D3D11.MAPPED_SUBRESOURCE
+		device_context->Map(palette_texture, 0, .WRITE_DISCARD, {}, &mapped_resource)
+		mem.copy(mapped_resource.pData, &cycled_palette[0], PALETTE_SIZE * 4)
+		device_context->Unmap(palette_texture, 0)
+
 		// Update time buffer
 		time_data: TicksBuffer
-		time_data.ticks = current_time
+		time_data.ticks = current_time & 0xFFFF
 		
-		mapped_resource: D3D11.MAPPED_SUBRESOURCE
 		device_context->Map(time_buffer, 0, .WRITE_DISCARD, {}, &mapped_resource)
 		mem.copy(mapped_resource.pData, &time_data, size_of(TicksBuffer))
 		device_context->Unmap(time_buffer, 0)
@@ -407,10 +417,8 @@ main :: proc() {
 		device_context->RSSetState(rasterizer_state)
 
 		device_context->PSSetShader(pixel_shader, nil, 0)
-		device_context->PSSetConstantBuffers(0, 1, &cycle_buffer) // Bind cycle constant buffer (b0)
-		device_context->PSSetConstantBuffers(1, 1, &time_buffer) // Bind time constant buffer (b1)
+		device_context->PSSetConstantBuffers(0, 1, &time_buffer) // Bind time constant buffer (b0)
 		// Bind pixel texture (t0) and palette texture (t1)
-
 		device_context->PSSetShaderResources(0, 1, &pixel_texture_view)
 		device_context->PSSetShaderResources(1, 1, &palette_texture_view)
 		device_context->PSSetSamplers(0, 1, &sampler_state)

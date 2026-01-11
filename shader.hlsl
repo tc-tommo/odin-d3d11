@@ -2,23 +2,13 @@ Texture2D pixelTex : register(t0);
 Texture2D palette  : register(t1);
 SamplerState samp0 : register(s0);
 
-struct CycleBuffer {
-    uint c_low;
-    uint c_high;
-    uint c_rate;
-};
-
-cbuffer CycleBufferCB : register(b0) {
-    CycleBuffer cycle_buffer[16];
-};
-
-cbuffer TicksBuffer : register(b1) {
-    uint ticks;
-};
-
 struct VSOut {
     float4 pos : SV_POSITION;
     float2 uv  : TEXCOORD;
+};
+
+cbuffer TicksBuffer : register(b0) {
+    uint ticks;
 };
 
 VSOut vs_main(uint id : SV_VertexID)
@@ -31,43 +21,11 @@ VSOut vs_main(uint id : SV_VertexID)
     return o;
 }
 
-
-
 float4 ps_main(VSOut i) : SV_TARGET
 {
-
-    #define LOW(index)  (cycle_buffer[index].c_low)
-    #define HIGH(index) (cycle_buffer[index].c_high)
-    #define RATE(index) (cycle_buffer[index].c_rate)
-
     // Sample pixel index from the pixel texture
     int pixel = int(pixelTex.Sample(samp0, i.uv).r * 255.0);
 
-    if (i.uv.y < 1.0/480.0)
-        pixel = int(i.uv.x * 255.0);
-    // start at 8, (middle)
-    int cycle_idx = 0;
-
-    // small and concise binary search (hardcoded for 16 cycle values)
-    // j ==> the subindex level going from 8 (top level) to 1 (item level)
-    for (int j = 8; j != 0; j >>= 1) {
-        cycle_idx |= (pixel >= LOW(cycle_idx | j)) ? j : 0;
-    }
-
-    if (pixel < LOW(cycle_idx) || pixel > HIGH(cycle_idx)) {
-        return palette.Load(uint3(pixel, 0, 0));
-    }
-
-    int cticks = ticks * RATE(cycle_idx);
-
-    int shift = 20;
-    int cycle_size = HIGH(cycle_idx) - LOW(cycle_idx) + 1;
-    int position_in_cycle = pixel - LOW(cycle_idx);
-    int current_offset = (position_in_cycle - (cticks >> shift)) % cycle_size;
-    if (current_offset < 0) current_offset += cycle_size;
-
-    int macrotick = LOW(cycle_idx) + current_offset;
-    int next_macrotick = LOW(cycle_idx) + ((current_offset + 1) % cycle_size);
-    float microtick = float(cticks & ((1 << shift) - 1)) / float((1 << shift));
-    return lerp(palette.Load(uint3(macrotick, 0, 0)), palette.Load(uint3(next_macrotick, 0, 0)), 1.0 - microtick);
+    // Lookup color from pre-cycled palette
+    return palette.Load(uint3(pixel, 0, 0));
 }
