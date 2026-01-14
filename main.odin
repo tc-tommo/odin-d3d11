@@ -10,6 +10,7 @@ import SDL "vendor:sdl2"
 import glm "core:math/linalg/glsl"
 import win "core:sys/windows"
 import strings "core:strings"
+import math "core:math"
 
 // Based off https://gist.github.com/d7samurai/261c69490cce0620d0bfc93003cd1052
 
@@ -217,9 +218,9 @@ main :: proc() {
 
 	sampler_desc := D3D11.SAMPLER_DESC{
 		Filter         = .MIN_MAG_MIP_POINT,
-		AddressU       = .WRAP,
-		AddressV       = .WRAP,
-		AddressW       = .WRAP,
+		AddressU       = .CLAMP,
+		AddressV       = .CLAMP,
+		AddressW       = .CLAMP,
 		ComparisonFunc = .NEVER,
 	}
 	sampler_state: ^D3D11.ISamplerState
@@ -274,7 +275,7 @@ main :: proc() {
 
 	palette_texture_desc := D3D11.TEXTURE2D_DESC{
 		Width      = PALETTE_SIZE,
-		Height     = 1,
+		Height     = 2, // Row 0: current cycle, Row 1: next cycle
 		MipLevels  = 1,
 		ArraySize  = 1,
 		Format     = .B8G8R8X8_UNORM,
@@ -291,11 +292,12 @@ main :: proc() {
 	device->CreateShaderResourceView(palette_texture, nil, &palette_texture_view)
 
 	// CPU-side buffer for cycled palette (BGRX format, 4 bytes per color)
-	cycled_palette: [PALETTE_SIZE * 4]u8
+	// Row 0: current cycle, Row 1: next cycle
+	cycled_palette: [PALETTE_SIZE * 4 * 2]u8
 
 	// Create constant buffer for time
 	TicksBuffer :: struct #align(16) {
-		ticks: u32,
+		cycle_fractions: [16]f32, // Fractional progress between current and next cycle (0.0 to 1.0)
 	}
 	
 	time_buffer_desc := D3D11.BUFFER_DESC{
@@ -308,8 +310,8 @@ main :: proc() {
 	time_buffer: ^D3D11.IBuffer
 	device->CreateBuffer(&time_buffer_desc, nil, &time_buffer)
 
-	// Function to compute cycled palette
-	update_cycled_palette :: proc(palette_src: []u8, palette_dst: []u8, lows: []u8, highs: []u8, rates: []u32, ticks: u32) {
+	// Function to compute cycled palette for a given cycle state
+	compute_cycle_state :: proc(palette_src: []u8, palette_dst: []u8, lows: []u8, highs: []u8, rates: []u32, ticks: u32, cycle_offset: i32) {
 		// Copy original palette
 		mem.copy(&palette_dst[0], &palette_src[0], len(palette_src))
 		
@@ -327,7 +329,7 @@ main :: proc() {
 			cticks := u64(ticks) * u64(rate)
 			
 			shift :: 20
-			cycle_advance := i32((cticks >> shift) % u64(cycle_size))
+			cycle_advance := i32((cticks >> shift) % u64(cycle_size)) + cycle_offset
 			
 			// Remap colors in this cycle range
 			for i in 0..<cycle_size {
@@ -346,6 +348,7 @@ main :: proc() {
 			}
 		}
 	}
+	
 
 	///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -363,6 +366,15 @@ main :: proc() {
 	// FPS counter variables
 	fps_frame_count: u32 = 0
 	fps_last_update: u32 = SDL.GetTicks()
+	
+	// Track integer part of ticks for palette remapping
+	shift :: 20
+	prev_integer_ticks: u32 = 0
+	
+	// Initialize palette once
+	row_size := PALETTE_SIZE * 4
+	compute_cycle_state(palette_data, cycled_palette[:row_size], lows[:], highs[:], rates[:], 0, 0)
+	compute_cycle_state(palette_data, cycled_palette[row_size:], lows[:], highs[:], rates[:], 0, 1)
 	
 	for quit := false; !quit; {
 		
@@ -389,18 +401,27 @@ main :: proc() {
 			fps_last_update = current_time
 		}
 
-		// Update cycled palette
-		update_cycled_palette(palette_data, cycled_palette[:], lows[:], highs[:], rates[:], current_time)
+		// Check if integer part of ticks changed (when ticks >> shift changes)
+		current_integer_ticks := current_time >> shift
+		if current_integer_ticks != prev_integer_ticks {
+			// Remap palette when integer part changes
+			compute_cycle_state(palette_data, cycled_palette[:row_size], lows[:], highs[:], rates[:], current_time, 0)
+			compute_cycle_state(palette_data, cycled_palette[row_size:], lows[:], highs[:], rates[:], current_time, 1)
+			prev_integer_ticks = current_integer_ticks
+		}
 		
-		// Update palette texture
+		// Always compute fractional part for shader interpolation
+		cycle_fractions := compute_cycle_fractions(current_time, rates[:])
+		
+		// Update palette texture (both rows)
 		mapped_resource: D3D11.MAPPED_SUBRESOURCE
 		device_context->Map(palette_texture, 0, .WRITE_DISCARD, {}, &mapped_resource)
-		mem.copy(mapped_resource.pData, &cycled_palette[0], PALETTE_SIZE * 4)
+		mem.copy(mapped_resource.pData, &cycled_palette[0], PALETTE_SIZE * 4 * 2)
 		device_context->Unmap(palette_texture, 0)
 
 		// Update time buffer
 		time_data: TicksBuffer
-		time_data.ticks = current_time & 0xFFFF
+		time_data.cycle_fractions = cycle_fractions
 		
 		device_context->Map(time_buffer, 0, .WRITE_DISCARD, {}, &mapped_resource)
 		mem.copy(mapped_resource.pData, &time_data, size_of(TicksBuffer))
